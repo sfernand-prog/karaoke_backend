@@ -16,13 +16,17 @@ const io = new Server(httpServer, {
     // Agrega aquí todas las URLs de Vercel que vayas generando
     origin: [
       "http://localhost:5173", 
-      "https://karaoke-frontend-efztwadsa-sfernand-progs-projects.vercel.app"
+      "https://karaoke-frontend-nine.vercel.app/"
     ],
     methods: ["GET", "POST"]
   }
 });
 
-app.use(cors());
+
+app.use(cors({
+  origin: allowedOrigins
+}));
+
 app.use(express.json());
 
 // --- 2. Conexión a MongoDB (Usa la variable de entorno de Render/Local) ---
