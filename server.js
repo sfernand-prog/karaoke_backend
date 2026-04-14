@@ -10,18 +10,19 @@ dotenv.config();
 const app = express();
 const httpServer = createServer(app);
 
-// --- 1. Configuración de Socket.io con CORS para Producción ---
+// --- Configuración de Seguridad (CORS) ---
+const allowedOrigins = [
+  "http://localhost:5173", 
+  "https://karaoke-frontend-nine.vercel.app" // Tu URL real (sin la barra / al final)
+];
+
 const io = new Server(httpServer, {
   cors: {
-    // Agrega aquí todas las URLs de Vercel que vayas generando
-    origin: [
-      "http://localhost:5173", 
-      "https://karaoke-frontend-nine.vercel.app/"
-    ],
-    methods: ["GET", "POST"]
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
-
 
 app.use(cors({
   origin: allowedOrigins
