@@ -18,12 +18,12 @@ const allowedOrigins = [
 
 const io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins,
-    methods: ["GET", "POST"],
-    credentials: true
+    origin: "*", // Cambia esto solo para probar si el 502 desaparece
+    methods: ["GET", "POST"]
   }
 });
 
+app.use(cors());
 app.use(cors({
   origin: allowedOrigins
 }));
