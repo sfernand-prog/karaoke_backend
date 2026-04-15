@@ -10,27 +10,23 @@ dotenv.config();
 const app = express();
 const httpServer = createServer(app);
 
-// --- Configuración de Seguridad (CORS) ---
+// --- 1. Configuración de Seguridad (CORS) ---
 const allowedOrigins = [
   "http://localhost:5173", 
-  "https://karaoke-frontend-nine.vercel.app" // Tu URL real (sin la barra / al final)
+  "https://karaoke-frontend-nine.vercel.app"
 ];
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // Cambia esto solo para probar si el 502 desaparece
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
 
-app.use(cors());
-app.use(cors({
-  origin: allowedOrigins
-}));
-
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
-// --- 2. Conexión a MongoDB (Usa la variable de entorno de Render/Local) ---
+// --- 2. Conexión a MongoDB ---
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("¡Conectado a MongoDB Atlas! 🚀"))
   .catch((err) => console.error("Error de conexión:", err));
@@ -40,15 +36,18 @@ const SongSchema = new mongoose.Schema({
   name: String,
   song: String,
   deviceId: String, 
-  status: { type: String, default: 'waiting' },
+  status: { type: String, default: 'waiting' }, // waiting, singing, finished
   boostTime: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
-  virtualTimestamp: { type: Date } // null = En Pausa
+  updatedAt: { type: Date, default: Date.now },
+  virtualTimestamp: { type: Date } 
 });
 
 const Song = mongoose.model('Song', SongSchema);
 
-// --- 4. Lógica de Ordenamiento (Activos arriba, Pausados abajo) ---
+// --- 4. Lógica de Consultas ---
+
+// Obtiene la fila de espera (activos primero, luego pausados)
 const getOrderedQueue = async () => {
   return await Song.aggregate([
     { $match: { status: 'waiting' } },
@@ -67,9 +66,16 @@ const getOrderedQueue = async () => {
   ]);
 };
 
+// Obtiene quién está cantando actualmente
+const getSingingList = async () => {
+  return await Song.find({ status: 'singing' }).sort({ updatedAt: -1 });
+};
+
+// Emite ambas listas a todos los clientes conectados
 const emitQueue = async () => {
   const queue = await getOrderedQueue();
-  io.emit('update_queue', queue);
+  const singing = await getSingingList();
+  io.emit('update_queue', { queue, singing });
 };
 
 // --- 5. Rutas de la API ---
@@ -77,7 +83,8 @@ const emitQueue = async () => {
 app.get('/api/queue', async (req, res) => {
   try {
     const queue = await getOrderedQueue();
-    res.json(queue);
+    const singing = await getSingingList();
+    res.json({ queue, singing });
   } catch (error) {
     res.status(500).json({ error: "Error al obtener la fila" });
   }
@@ -88,7 +95,6 @@ app.post('/api/queue', async (req, res) => {
     const { name, song, deviceId } = req.body;
     const now = new Date();
 
-    // CANDADO DOBLE: Bloquea por nombre o por dispositivo (ID del fierro)
     const userHasActive = await Song.findOne({ 
       status: 'waiting',
       virtualTimestamp: { $ne: null },
@@ -100,6 +106,7 @@ app.post('/api/queue', async (req, res) => {
       song,
       deviceId,
       createdAt: now,
+      updatedAt: now,
       virtualTimestamp: userHasActive ? null : now 
     });
 
@@ -108,6 +115,40 @@ app.post('/api/queue', async (req, res) => {
     res.status(201).json(newSong);
   } catch (error) {
     res.status(400).json({ error: "Error al agregar" });
+  }
+});
+
+// NUEVO ENDPOINT: Pasar a cantar
+app.post('/api/queue/:id/sing', async (req, res) => {
+  try {
+    // 1. Finalizar cualquier canción que estuviera en 'singing'
+    await Song.updateMany({ status: 'singing' }, { $set: { status: 'finished' } });
+
+    // 2. Mover la canción seleccionada a 'singing'
+    const song = await Song.findByIdAndUpdate(
+      req.params.id, 
+      { status: 'singing', updatedAt: new Date() }, 
+      { new: true }
+    );
+
+    if (!song) return res.status(404).json({ error: "Canción no encontrada" });
+
+    // 3. Activar la siguiente canción del mismo usuario/dispositivo
+    const nextInLine = await Song.findOne({ 
+      status: 'waiting', 
+      virtualTimestamp: null,
+      $or: [ { name: song.name }, { deviceId: song.deviceId } ]
+    }).sort({ createdAt: 1 });
+
+    if (nextInLine) {
+      nextInLine.virtualTimestamp = new Date();
+      await nextInLine.save();
+    }
+
+    await emitQueue();
+    res.json(song);
+  } catch (error) {
+    res.status(500).json({ error: "Error al pasar a cantar" });
   }
 });
 
@@ -120,6 +161,7 @@ app.post('/api/queue/boost', async (req, res) => {
     if (song && song.virtualTimestamp) {
       song.virtualTimestamp = new Date(song.virtualTimestamp.getTime() - msToSubtract);
       song.boostTime += msToSubtract;
+      song.updatedAt = new Date();
       await song.save();
       await emitQueue();
       res.json({ success: true });
@@ -131,10 +173,9 @@ app.post('/api/queue/boost', async (req, res) => {
   }
 });
 
-// RUTA DE BORRADO (DJ y Usuario)
 app.delete('/api/queue/:id', async (req, res) => {
   try {
-    const { by } = req.query; // 'dj' o 'user'
+    const { by } = req.query; 
     const songToDelete = await Song.findById(req.params.id);
     
     if (!songToDelete) return res.sendStatus(404);
@@ -145,7 +186,6 @@ app.delete('/api/queue/:id', async (req, res) => {
 
     await Song.findByIdAndDelete(req.params.id);
 
-    // Activar la siguiente canción del mismo usuario/dispositivo
     const nextInLine = await Song.findOne({ 
       status: 'waiting', 
       virtualTimestamp: null,
@@ -153,7 +193,6 @@ app.delete('/api/queue/:id', async (req, res) => {
     }).sort({ createdAt: 1 });
 
     if (nextInLine) {
-      // Herencia si borra el usuario, Reinicio si borra el DJ (ya cantó)
       nextInLine.virtualTimestamp = (by === 'user' && deletedTime) ? deletedTime : new Date();
       await nextInLine.save();
     }
@@ -169,10 +208,11 @@ app.delete('/api/queue/:id', async (req, res) => {
 io.on('connection', async (socket) => {
   console.log('Nuevo cliente conectado 📱:', socket.id);
   const queue = await getOrderedQueue();
-  socket.emit('update_queue', queue);
+  const singing = await getSingingList();
+  socket.emit('update_queue', { queue, singing });
 });
 
-// --- 7. Iniciar el servidor (Configuración para Hosting) ---
+// --- 7. Iniciar el servidor ---
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor backend corriendo en el puerto ${PORT}`);
