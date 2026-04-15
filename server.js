@@ -152,6 +152,37 @@ app.post('/api/queue/:id/sing', async (req, res) => {
   }
 });
 
+// NUEVO ENDPOINT: Atrasar un lugar
+app.post('/api/queue/:id/delay', async (req, res) => {
+  try {
+    const currentSong = await Song.findById(req.params.id);
+    if (!currentSong || !currentSong.virtualTimestamp) return res.status(400).json({ error: "Invalido" });
+
+    const queue = await getOrderedQueue();
+    const index = queue.findIndex(s => s._id.toString() === req.params.id);
+
+    if (index !== -1 && index < queue.length - 1) {
+      const nextSongData = queue[index + 1];
+      if (!nextSongData.virtualTimestamp) return res.status(400).json({ error: "Final de fila activa" });
+
+      const nextSong = await Song.findById(nextSongData._id);
+      const tempTime = currentSong.virtualTimestamp;
+      
+      currentSong.virtualTimestamp = nextSong.virtualTimestamp;
+      nextSong.virtualTimestamp = tempTime;
+
+      await currentSong.save();
+      await nextSong.save();
+      await emitQueue();
+      res.json({ success: true });
+    } else {
+      res.status(400).json({ error: "No se puede atrasar" });
+    }
+  } catch (error) {
+    res.status(500).json({ error: "Error en delay" });
+  }
+});
+
 app.post('/api/queue/boost', async (req, res) => {
   try {
     const { songId, minutesToBuy } = req.body;
