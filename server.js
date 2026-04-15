@@ -47,7 +47,6 @@ const Song = mongoose.model('Song', SongSchema);
 
 // --- 4. Lógica de Consultas ---
 
-// Obtiene la fila de espera (activos primero, luego pausados)
 const getOrderedQueue = async () => {
   return await Song.aggregate([
     { $match: { status: 'waiting' } },
@@ -66,12 +65,10 @@ const getOrderedQueue = async () => {
   ]);
 };
 
-// Obtiene quién está cantando actualmente
 const getSingingList = async () => {
   return await Song.find({ status: 'singing' }).sort({ updatedAt: -1 });
 };
 
-// Emite ambas listas a todos los clientes conectados
 const emitQueue = async () => {
   const queue = await getOrderedQueue();
   const singing = await getSingingList();
@@ -118,22 +115,56 @@ app.post('/api/queue', async (req, res) => {
   }
 });
 
-// NUEVO ENDPOINT: Pasar a cantar
+// NUEVO: Retrasar un lugar (DJ)
+app.post('/api/queue/:id/delay', async (req, res) => {
+  try {
+    const currentSong = await Song.findById(req.params.id);
+    if (!currentSong || !currentSong.virtualTimestamp) {
+      return res.status(400).json({ error: "Canción no válida o en pausa" });
+    }
+
+    const queue = await getOrderedQueue();
+    const index = queue.findIndex(s => s._id.toString() === req.params.id);
+
+    // Solo podemos atrasar si hay alguien después en la lista activa (virtualTimestamp no null)
+    if (index !== -1 && index < queue.length - 1) {
+      const nextSongData = queue[index + 1];
+      
+      // Si el siguiente está en pausa, no intercambiamos (para no romper la lógica de activos/pausados)
+      if (!nextSongData.virtualTimestamp) {
+        return res.status(400).json({ error: "No hay nadie activo detrás para intercambiar" });
+      }
+
+      const nextSong = await Song.findById(nextSongData._id);
+
+      // Intercambiamos los virtualTimestamps
+      const tempTime = currentSong.virtualTimestamp;
+      currentSong.virtualTimestamp = nextSong.virtualTimestamp;
+      nextSong.virtualTimestamp = tempTime;
+
+      await currentSong.save();
+      await nextSong.save();
+
+      await emitQueue();
+      res.json({ success: true });
+    } else {
+      res.status(400).json({ error: "Ya es el último de la fila activa" });
+    }
+  } catch (error) {
+    res.status(500).json({ error: "Error al retrasar" });
+  }
+});
+
 app.post('/api/queue/:id/sing', async (req, res) => {
   try {
-    // 1. Finalizar cualquier canción que estuviera en 'singing'
     await Song.updateMany({ status: 'singing' }, { $set: { status: 'finished' } });
-
-    // 2. Mover la canción seleccionada a 'singing'
     const song = await Song.findByIdAndUpdate(
       req.params.id, 
       { status: 'singing', updatedAt: new Date() }, 
       { new: true }
     );
-
     if (!song) return res.status(404).json({ error: "Canción no encontrada" });
 
-    // 3. Activar la siguiente canción del mismo usuario/dispositivo
     const nextInLine = await Song.findOne({ 
       status: 'waiting', 
       virtualTimestamp: null,
@@ -177,7 +208,6 @@ app.delete('/api/queue/:id', async (req, res) => {
   try {
     const { by } = req.query; 
     const songToDelete = await Song.findById(req.params.id);
-    
     if (!songToDelete) return res.sendStatus(404);
 
     const userName = songToDelete.name;
@@ -206,7 +236,6 @@ app.delete('/api/queue/:id', async (req, res) => {
 
 // --- 6. Eventos de Socket.io ---
 io.on('connection', async (socket) => {
-  console.log('Nuevo cliente conectado 📱:', socket.id);
   const queue = await getOrderedQueue();
   const singing = await getSingingList();
   socket.emit('update_queue', { queue, singing });
