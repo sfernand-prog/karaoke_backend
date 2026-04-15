@@ -10,23 +10,27 @@ dotenv.config();
 const app = express();
 const httpServer = createServer(app);
 
-// --- 1. Configuración de Seguridad (CORS) ---
+// --- Configuración de Seguridad (CORS) ---
 const allowedOrigins = [
   "http://localhost:5173", 
-  "https://karaoke-frontend-nine.vercel.app"
+  "https://karaoke-frontend-nine.vercel.app" // Tu URL real (sin la barra / al final)
 ];
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", 
+    origin: "*", // Cambia esto solo para probar si el 502 desaparece
     methods: ["GET", "POST"]
   }
 });
 
-app.use(cors({ origin: allowedOrigins }));
+app.use(cors());
+app.use(cors({
+  origin: allowedOrigins
+}));
+
 app.use(express.json());
 
-// --- 2. Conexión a MongoDB ---
+// --- 2. Conexión a MongoDB (Usa la variable de entorno de Render/Local) ---
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("¡Conectado a MongoDB Atlas! 🚀"))
   .catch((err) => console.error("Error de conexión:", err));
@@ -36,17 +40,15 @@ const SongSchema = new mongoose.Schema({
   name: String,
   song: String,
   deviceId: String, 
-  status: { type: String, default: 'waiting' }, // waiting, singing, finished
+  status: { type: String, default: 'waiting' },
   boostTime: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-  virtualTimestamp: { type: Date } 
+  virtualTimestamp: { type: Date } // null = En Pausa
 });
 
 const Song = mongoose.model('Song', SongSchema);
 
-// --- 4. Lógica de Consultas ---
-
+// --- 4. Lógica de Ordenamiento (Activos arriba, Pausados abajo) ---
 const getOrderedQueue = async () => {
   return await Song.aggregate([
     { $match: { status: 'waiting' } },
@@ -65,14 +67,9 @@ const getOrderedQueue = async () => {
   ]);
 };
 
-const getSingingList = async () => {
-  return await Song.find({ status: 'singing' }).sort({ updatedAt: -1 });
-};
-
 const emitQueue = async () => {
   const queue = await getOrderedQueue();
-  const singing = await getSingingList();
-  io.emit('update_queue', { queue, singing });
+  io.emit('update_queue', queue);
 };
 
 // --- 5. Rutas de la API ---
@@ -80,8 +77,7 @@ const emitQueue = async () => {
 app.get('/api/queue', async (req, res) => {
   try {
     const queue = await getOrderedQueue();
-    const singing = await getSingingList();
-    res.json({ queue, singing });
+    res.json(queue);
   } catch (error) {
     res.status(500).json({ error: "Error al obtener la fila" });
   }
@@ -92,6 +88,7 @@ app.post('/api/queue', async (req, res) => {
     const { name, song, deviceId } = req.body;
     const now = new Date();
 
+    // CANDADO DOBLE: Bloquea por nombre o por dispositivo (ID del fierro)
     const userHasActive = await Song.findOne({ 
       status: 'waiting',
       virtualTimestamp: { $ne: null },
@@ -103,7 +100,6 @@ app.post('/api/queue', async (req, res) => {
       song,
       deviceId,
       createdAt: now,
-      updatedAt: now,
       virtualTimestamp: userHasActive ? null : now 
     });
 
@@ -112,74 +108,6 @@ app.post('/api/queue', async (req, res) => {
     res.status(201).json(newSong);
   } catch (error) {
     res.status(400).json({ error: "Error al agregar" });
-  }
-});
-
-// NUEVO: Retrasar un lugar (DJ)
-app.post('/api/queue/:id/delay', async (req, res) => {
-  try {
-    const currentSong = await Song.findById(req.params.id);
-    if (!currentSong || !currentSong.virtualTimestamp) {
-      return res.status(400).json({ error: "Canción no válida o en pausa" });
-    }
-
-    const queue = await getOrderedQueue();
-    const index = queue.findIndex(s => s._id.toString() === req.params.id);
-
-    // Solo podemos atrasar si hay alguien después en la lista activa (virtualTimestamp no null)
-    if (index !== -1 && index < queue.length - 1) {
-      const nextSongData = queue[index + 1];
-      
-      // Si el siguiente está en pausa, no intercambiamos (para no romper la lógica de activos/pausados)
-      if (!nextSongData.virtualTimestamp) {
-        return res.status(400).json({ error: "No hay nadie activo detrás para intercambiar" });
-      }
-
-      const nextSong = await Song.findById(nextSongData._id);
-
-      // Intercambiamos los virtualTimestamps
-      const tempTime = currentSong.virtualTimestamp;
-      currentSong.virtualTimestamp = nextSong.virtualTimestamp;
-      nextSong.virtualTimestamp = tempTime;
-
-      await currentSong.save();
-      await nextSong.save();
-
-      await emitQueue();
-      res.json({ success: true });
-    } else {
-      res.status(400).json({ error: "Ya es el último de la fila activa" });
-    }
-  } catch (error) {
-    res.status(500).json({ error: "Error al retrasar" });
-  }
-});
-
-app.post('/api/queue/:id/sing', async (req, res) => {
-  try {
-    await Song.updateMany({ status: 'singing' }, { $set: { status: 'finished' } });
-    const song = await Song.findByIdAndUpdate(
-      req.params.id, 
-      { status: 'singing', updatedAt: new Date() }, 
-      { new: true }
-    );
-    if (!song) return res.status(404).json({ error: "Canción no encontrada" });
-
-    const nextInLine = await Song.findOne({ 
-      status: 'waiting', 
-      virtualTimestamp: null,
-      $or: [ { name: song.name }, { deviceId: song.deviceId } ]
-    }).sort({ createdAt: 1 });
-
-    if (nextInLine) {
-      nextInLine.virtualTimestamp = new Date();
-      await nextInLine.save();
-    }
-
-    await emitQueue();
-    res.json(song);
-  } catch (error) {
-    res.status(500).json({ error: "Error al pasar a cantar" });
   }
 });
 
@@ -192,7 +120,6 @@ app.post('/api/queue/boost', async (req, res) => {
     if (song && song.virtualTimestamp) {
       song.virtualTimestamp = new Date(song.virtualTimestamp.getTime() - msToSubtract);
       song.boostTime += msToSubtract;
-      song.updatedAt = new Date();
       await song.save();
       await emitQueue();
       res.json({ success: true });
@@ -204,10 +131,12 @@ app.post('/api/queue/boost', async (req, res) => {
   }
 });
 
+// RUTA DE BORRADO (DJ y Usuario)
 app.delete('/api/queue/:id', async (req, res) => {
   try {
-    const { by } = req.query; 
+    const { by } = req.query; // 'dj' o 'user'
     const songToDelete = await Song.findById(req.params.id);
+    
     if (!songToDelete) return res.sendStatus(404);
 
     const userName = songToDelete.name;
@@ -216,6 +145,7 @@ app.delete('/api/queue/:id', async (req, res) => {
 
     await Song.findByIdAndDelete(req.params.id);
 
+    // Activar la siguiente canción del mismo usuario/dispositivo
     const nextInLine = await Song.findOne({ 
       status: 'waiting', 
       virtualTimestamp: null,
@@ -223,6 +153,7 @@ app.delete('/api/queue/:id', async (req, res) => {
     }).sort({ createdAt: 1 });
 
     if (nextInLine) {
+      // Herencia si borra el usuario, Reinicio si borra el DJ (ya cantó)
       nextInLine.virtualTimestamp = (by === 'user' && deletedTime) ? deletedTime : new Date();
       await nextInLine.save();
     }
@@ -236,12 +167,12 @@ app.delete('/api/queue/:id', async (req, res) => {
 
 // --- 6. Eventos de Socket.io ---
 io.on('connection', async (socket) => {
+  console.log('Nuevo cliente conectado 📱:', socket.id);
   const queue = await getOrderedQueue();
-  const singing = await getSingingList();
-  socket.emit('update_queue', { queue, singing });
+  socket.emit('update_queue', queue);
 });
 
-// --- 7. Iniciar el servidor ---
+// --- 7. Iniciar el servidor (Configuración para Hosting) ---
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor backend corriendo en el puerto ${PORT}`);
