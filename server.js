@@ -223,11 +223,12 @@ app.delete('/api/queue/:id', async (req, res) => {
       $or: [ { name: userName }, { deviceId: devId } ]
     }).sort({ createdAt: 1 });
 
-    if (nextInLine) {
-      nextInLine.virtualTimestamp = (by === 'user' && deletedTime) ? deletedTime : new Date();
+   
+  if (nextInLine && deletedTime) { 
+     // Solo activamos la siguiente si la que borraste tenía tiempo corriendo
+     nextInLine.virtualTimestamp = deletedTime;
       await nextInLine.save();
-    }
-
+  }
     await emitQueue();
     res.sendStatus(204);
   } catch (error) {
