@@ -85,22 +85,61 @@ export const adjustPriorityLogic = async (songId, direction) => {
   if (!song) throw new Error("SONG_NOT_FOUND");
 
   const queue = await getOrderedQueue(song.sessionId);
-  const index = queue.findIndex(s => s._id.toString() === songId);
+  // Solo aplicamos la lógica a las canciones que están activas (tienen tiempo)
+  const activeQueue = queue.filter(s => s.virtualTimestamp !== null);
+  const index = activeQueue.findIndex(s => s._id.toString() === songId);
 
-  // ADELANTAR: Sube un lugar en la lista
+  // Si está en pausa no se hace nada
+  if (index === -1) return song.sessionId;
+
+  // ADELANTAR: Sube un lugar
   if (direction === 'advance' && index > 0) {
-    const targetSong = await Song.findById(queue[index - 1]._id);
-    const tempTime = song.virtualTimestamp;
-    
-    song.virtualTimestamp = targetSong.virtualTimestamp;
-    song.adjustmentMarker = 'advanced'; //
-    
-    targetSong.virtualTimestamp = tempTime;
-    
+    let newTimeMs;
+    if (index === 1) {
+      // Sube a la posición #1: Restamos 1 segundo al tiempo del primero
+      newTimeMs = new Date(activeQueue[0].virtualTimestamp).getTime() - 1000;
+    } else {
+      // Se inserta matemáticamente en el medio del anterior y el anterior-anterior
+      const tPrevPrev = new Date(activeQueue[index - 2].virtualTimestamp).getTime();
+      const tPrev = new Date(activeQueue[index - 1].virtualTimestamp).getTime();
+      const diff = tPrev - tPrevPrev;
+      
+      if (diff > 2) {
+        newTimeMs = tPrevPrev + Math.floor(diff / 2);
+      } else {
+        newTimeMs = tPrev - 1000; // Si no hay espacio, fuerza 1 segundo
+      }
+    }
+    song.virtualTimestamp = new Date(newTimeMs);
+    song.adjustmentMarker = 'advanced';
     await song.save();
-    await targetSong.save();
   } 
   
+  // RETRASAR: Baja un lugar
+  if (direction === 'delay' && index < activeQueue.length - 1) {
+    let newTimeMs;
+    if (index === activeQueue.length - 2) {
+      // Baja a la última posición: Sumamos 1 segundo al tiempo del último
+      newTimeMs = new Date(activeQueue[activeQueue.length - 1].virtualTimestamp).getTime() + 1000;
+    } else {
+      // Se inserta matemáticamente en el medio del siguiente y el subsiguiente
+      const tNext = new Date(activeQueue[index + 1].virtualTimestamp).getTime();
+      const tNextNext = new Date(activeQueue[index + 2].virtualTimestamp).getTime();
+      const diff = tNextNext - tNext;
+      
+      if (diff > 2) {
+        newTimeMs = tNext + Math.floor(diff / 2);
+      } else {
+        newTimeMs = tNext + 1000; // Si no hay espacio, fuerza 1 segundo
+      }
+    }
+    song.virtualTimestamp = new Date(newTimeMs);
+    song.adjustmentMarker = 'delayed';
+    await song.save();
+  }
+  
+  return song.sessionId; 
+};  
   // RETRASAR: Baja un lugar en la lista
   if (direction === 'delay' && index < queue.length - 1) {
     const targetSong = await Song.findById(queue[index + 1]._id);
