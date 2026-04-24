@@ -5,12 +5,8 @@ const UserSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true },
   password: { type: String, required: true },
   role: { type: String, enum: ['super', 'admin', 'dj'], required: true },
-  localInfo: {
-    localId: { type: String, unique: true, sparse: true },
-    name: String,
-    address: String
-  },
-  associatedLocalId: { type: String } 
+  // Referencia única: solo guardamos el localId
+  associatedLocalId: { type: String, index: true } 
 }, { timestamps: true });
 
 export default mongoose.model('User', UserSchema);
