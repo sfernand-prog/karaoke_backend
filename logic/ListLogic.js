@@ -80,6 +80,7 @@ export const addSongLogic = async (songData) => {
 };
 
 // 5. Lógica de Justicia: Adelantar o Retrasar
+
 export const adjustPriorityLogic = async (songId, direction) => {
   const song = await Song.findById(songId);
   if (!song) throw new Error("SONG_NOT_FOUND");
@@ -136,22 +137,6 @@ export const adjustPriorityLogic = async (songId, direction) => {
     song.virtualTimestamp = new Date(newTimeMs);
     song.adjustmentMarker = 'delayed';
     await song.save();
-  }
-  
-  return song.sessionId; 
-};  
-  // RETRASAR: Baja un lugar en la lista
-  if (direction === 'delay' && index < queue.length - 1) {
-    const targetSong = await Song.findById(queue[index + 1]._id);
-    const tempTime = song.virtualTimestamp;
-    
-    song.virtualTimestamp = targetSong.virtualTimestamp;
-    song.adjustmentMarker = 'delayed'; //
-    
-    targetSong.virtualTimestamp = tempTime;
-    
-    await song.save();
-    await targetSong.save();
   }
   
   return song.sessionId; 
