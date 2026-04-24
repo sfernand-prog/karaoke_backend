@@ -1,6 +1,5 @@
 import mongoose from 'mongoose';
 
-const uri = "mongodb+srv://sfernand:HI9qYgKpnCtbJfMB@cluster0.l8aajfh.mongodb.net/karaoke_db?retryWrites=true&w=majority";
 
 console.log("⏳ Intentando conectar a MongoDB Atlas...");
 
