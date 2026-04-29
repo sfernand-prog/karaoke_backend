@@ -1,6 +1,14 @@
 import express from 'express';
 import Song from '../models/Song.js';
-import { getOrderedQueue, getSingingList, emitQueue, addSongLogic, adjustPriorityLogic } from '../logic/ListLogic.js';
+import { 
+  getOrderedQueue, 
+  getSingingList, 
+  emitQueue, 
+  addSongLogic, 
+  adjustPriorityLogic, 
+  markSongAsSingingLogic,
+  deleteUserSongsLogic // Nueva importación
+} from '../logic/ListLogic.js';
 
 const router = express.Router();
 
@@ -31,51 +39,22 @@ export default (io) => {
     }
   });
 
-  // 3. Ajustar prioridad (Debe ir antes de /:id para no cruzar rutas)
+  // 3. Ajustar prioridad
   router.post('/adjust-priority', async (req, res) => {
     try {
       const { songId, direction } = req.body;
       const sessionId = await adjustPriorityLogic(songId, direction);
       await emitQueue(io, sessionId);
-      res.sendStatus(200);
+      res.json({ success: true });
     } catch (error) {
-      console.error("Error al ajustar prioridad:", error.message);
-      res.status(500).json({ error: error.message });
+      res.status(400).json({ error: error.message });
     }
   });
 
-  // 4. Cantar (Mover a singing)
+  // 4. Marcar canción para cantar
   router.post('/:id/sing', async (req, res) => {
     try {
-      
-      const songToSing = await Song.findById(req.params.id);
-      if (!songToSing) return res.status(404).json({ error: "Canción no encontrada" });
-
-      // Finalizar las que estén cantando EN ESA SESIÓN
-      await Song.updateMany(
-        { status: 'singing', sessionId: songToSing.sessionId }, 
-        { $set: { status: 'finished' } }
-      );
-
-      const song = await Song.findByIdAndUpdate(
-        req.params.id, 
-        { status: 'singing', updatedAt: new Date() },
-        { new: true }
-      );
-      
-      // Activar la siguiente del mismo usuario en la misma sesión
-      const nextInLine = await Song.findOne({ 
-        status: 'waiting', 
-        sessionId: song.sessionId,
-        virtualTimestamp: null,
-        $or: [{ name: song.name }, { deviceId: song.deviceId }]
-      }).sort({ createdAt: 1 });
-
-      if (nextInLine) {
-        nextInLine.virtualTimestamp = new Date();
-        await nextInLine.save();
-      }
-
+      const song = await markSongAsSingingLogic(req.params.id);
       await emitQueue(io, song.sessionId);
       res.json(song);
     } catch (error) {
@@ -84,7 +63,7 @@ export default (io) => {
     }
   });
 
-  // 5. Eliminar canción
+  // 5. Eliminar canción individual
   router.delete('/:id', async (req, res) => {
     try {
       const songToDelete = await Song.findById(req.params.id);
@@ -92,25 +71,51 @@ export default (io) => {
 
       const sId = songToDelete.sessionId;
       const deletedTime = songToDelete.virtualTimestamp;
+      const dId = songToDelete.deviceId;
+      const uName = songToDelete.name;
       
       await Song.findByIdAndDelete(req.params.id);
 
-      const nextInLine = await Song.findOne({ 
-        status: 'waiting', 
-        sessionId: sId,
-        virtualTimestamp: null,
-        $or: [{ name: songToDelete.name }, { deviceId: songToDelete.deviceId }]
-      }).sort({ createdAt: 1 });
+      // Lógica de "Justicia": Activar la siguiente si la borrada estaba activa
+      if (deletedTime) {
+        const nextInLine = await Song.findOne({ 
+          status: 'waiting', 
+          sessionId: sId,
+          virtualTimestamp: null,
+          $or: [{ name: uName }, { deviceId: dId }]
+        }).sort({ createdAt: 1 });
 
-      if (nextInLine && deletedTime) {
-        nextInLine.virtualTimestamp = deletedTime;
-        await nextInLine.save();
+        if (nextInLine) {
+          nextInLine.virtualTimestamp = deletedTime;
+          await nextInLine.save();
+        }
       }
 
       await emitQueue(io, sId);
       res.sendStatus(204);
     } catch (error) {
-      console.error("Error en DELETE /:id:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // 6. NUEVO: Borrar todas las canciones de un usuario en la sesión
+  router.delete('/user/:deviceId', async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const { sessionId } = req.query; // Recibimos el sessionId por query string
+
+      if (!sessionId) {
+        return res.status(400).json({ error: "DEVICE_ID_AND_SESSION_ID_REQUIRED" });
+      }
+
+      await deleteUserSongsLogic(deviceId, sessionId);
+      
+      // Emitimos la actualización a todos en la sala
+      await emitQueue(io, sessionId);
+      
+      res.json({ message: "Todas las canciones del usuario han sido eliminadas" });
+    } catch (error) {
+      console.error("Error en DELETE /user/:deviceId:", error.message);
       res.status(500).json({ error: error.message });
     }
   });

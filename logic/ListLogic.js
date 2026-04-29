@@ -194,3 +194,16 @@ export const markSongAsSingingLogic = async (songId) => {
 
   return song;
 };
+
+// 7. NUEVO: Borrar todas las canciones de un usuario en una sesión
+export const deleteUserSongsLogic = async (deviceId, sessionId) => {
+  if (!deviceId || !sessionId) {
+    throw new Error("DEVICE_ID_AND_SESSION_ID_REQUIRED");
+  }
+
+  return await Song.deleteMany({
+    deviceId,
+    sessionId,
+    status: 'waiting'
+  });
+};
